@@ -1,0 +1,212 @@
+---
+title: STAT 485 - Team Performance Imbalance in the NHL
+author: "Trevor Dallow"
+date: "December 3, 2018"
+output: word_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pkgs <- c("XML", "RCurl", "tidyverse", "tseries", "TSA", "forecast")
+
+miss <- pkgs[!(pkgs %in% row.names(installed.packages()))]
+
+if (length(miss)) {
+  install.packages(miss)
+}
+
+suppressPackageStartupMessages(lapply(pkgs, require, character.only = T))
+```
+
+# Introduction
+
+```{r Generate url links of nhl standings, include = F}
+first.year <- 1918
+last.year <- 2018
+
+base.nhl.url <- "http://www.hockeydb.com/ihdb/stats/leagues/seasons/nhl1927"
+nhl.url <- paste0(base.nhl.url, first.year:last.year, ".html")
+```
+
+```{r Extract table from each url link then bind all tables, include = F}
+standings.ls <- vector(mode = "list")
+for (i in first.year:last.year) {
+  nhl.page <- getURL(nhl.url[i - (first.year - 1)])
+
+  curr.standings <- readHTMLTable(nhl.page)
+
+  if (length(curr.standings)) {
+    standings.ls[[as.character(i)]] <- cbind('Year' = i, curr.standings[[1]])
+  } else {
+    # Skip for full season lockouts
+  }
+}
+
+all.standings.bind <- bind_rows(standings.ls)
+```
+
+```{r Clean the extracted standings tables, include = F}
+all.standings <- all.standings.bind %>%
+  rename(Playoff = `Playoff Results`, Tie = `T`) %>%
+  filter(Playoff != "") %>%
+  mutate(GP = as.numeric(GP),
+         W = as.numeric(W),
+         L = as.numeric(L),
+         Tie = as.numeric(Tie),
+         Pts = as.numeric(Pts),
+         GF = as.numeric(GF),
+         GA = as.numeric(GA),
+         PIM = as.numeric(PIM),
+         Att. = as.numeric(gsub(",", "", Att.)),
+         OTL = as.numeric(OTL),
+         SOL = as.numeric(SOL))
+
+write.csv(all.standings, file = "nhl_standings_1918-2018.csv", row.names = F)
+```
+
+```{r Extract data of interest from the table, include = F}
+all.standings <- read.csv(file = "nhl_standings_1918-2018.csv")
+
+quantile(all.standings$Pts, probs = c(0.1, 0.9))
+
+nhl.standings.smy <- all.standings %>%
+  # Determine total possible points obtainable for each team for every season
+  mutate(tot.pts = GP * 2,
+         # Determine the proportion of possible points obtainable that each team achieved
+         prop.tot.pts = Pts / tot.pts) %>%
+  group_by(Year) %>%
+  summarise(diff.prop = max(prop.tot.pts) - min(prop.tot.pts)) %>%
+  ungroup() %>%
+  # Standardize the point differential as if the teams played 82 games a season
+  # 82 games because thats the number of games played per season currently
+  mutate(diff.pts = diff.prop * (82 * 2))
+
+all.years <- first.year:last.year
+
+missing.years <- all.years[!(all.years %in% nhl.standings.smy$Year)]
+```
+
+```{r The time series data, include = F}
+standings.ts <- ts(nhl.standings.smy$diff.pts)
+```
+
+# Methods
+
+```{r normaility of original, echo = F}
+qqnorm(standings.ts)
+qqline(standings.ts)
+```
+
+```{r, echo = F}
+log.standings.ts <- log(standings.ts)
+
+qqnorm(log.standings.ts, main = "Log Transform")
+qqline(log.standings.ts)
+```
+
+```{r original and first difference, echo = F}
+par(mfrow = c(1, 2))
+plot(log.standings.ts, type = "l",
+     main = "Original",
+     xlab = "Season", ylab = "log(Point Difference)")
+plot(diff(log.standings.ts), type = "l",
+     main = "1st Difference",
+     xlab = "Season", ylab = "")
+par(mfrow = c(1, 1))
+```
+
+```{r augmented dickey-fuller test, include = F}
+adf.test(log.standings.ts, k = 0)
+```
+
+```{r acf and pacf plots, echo = F}
+acf(log.standings.ts)
+
+pacf(log.standings.ts)
+```
+
+```{r order specification, include = F}
+ts.acf <- acf(log.standings.ts, plot = F)$acf
+
+ts.pacf <- pacf(log.standings.ts, plot = F)$acf
+
+abs(ts.acf[3:length(ts.acf)]) < 2 * sqrt((1 / length(log.standings.ts)) * (1 + 2 * sum(ts.acf[2] ^ 2)))
+
+abs(ts.pacf[2:length(ts.pacf)]) < 2 /sqrt(length(log.standings.ts))
+```
+
+```{r estimate parameters, include = F}
+set.seed(1)
+
+arima(log.standings.ts, order = c(1, 0, 0), method = "CSS")
+arima(log.standings.ts, order = c(0, 0, 1), method = "CSS")
+arima(log.standings.ts, order = c(1, 0, 1), method = "CSS")
+
+arima(log.standings.ts, order = c(1, 0, 0), method = "ML")
+arima(log.standings.ts, order = c(0, 0, 1), method = "ML")
+arima(log.standings.ts, order = c(1, 0, 1), method = "ML")
+```
+
+```{r fit the model, include = F}
+# USING ML for ARMA(1,1)
+
+fit <- arima(log.standings.ts, order = c(1, 0, 1), method = "ML")
+```
+
+```{r mean 0 and constant variance, echo = F}
+plot(rstandard(fit), ylab ='Standardized Residuals', 
+     type = 'o', ylim = c(-3.5,3.5))
+abline(h = c(0, -3, 3), lty = c(1, 2, 2))
+```
+
+```{r residual normality, echo = F}
+qqnorm(residuals(fit))
+qqline(residuals(fit))
+```
+
+```{r shpiro test, include = F}
+shapiro.test(residuals(fit))
+```
+
+```{r acf residuals, echo = F}
+acf(residuals(fit))
+```
+
+```{r ljung-box test, include = F}
+n = length(log.standings.ts)
+K = 6
+
+q <- n * (n + 2) * sum(signif(acf(residuals(fit), plot = F)$acf[1:K], 2) ^ 2 / (n - c(1:K)))
+
+1 - pchisq(q = q, df = K - 1 - 1)
+```
+
+# Results
+
+```{r final model parameters, include = F}
+log.mean <- mean(log.standings.ts)
+log.se <- sd(log.standings.ts)
+
+ts.sim <- arima.sim(list(order = c(1, 0, 1), ar = 0.2896, ma = 0.1400), n = length(log.standings.ts))
+
+mean(log.standings.ts)
+sd(log.standings.ts)
+```
+
+```{r compare original and simlated, echo = F, warnings = F}
+df <- data.frame(season = 1:length(log.standings.ts),
+                 original = exp(log.standings.ts),
+                 simulated = exp(ts.sim * log.se + log.mean)) %>%
+  gather(key = ts.type, value = observation, -season)
+
+ggplot(df, aes(x = season, y = observation, lty = ts.type)) +
+  geom_line() +
+  labs(title = "Team Talent Discrepancy in the NHL",
+       x = "Season",
+       y = "Point Differential",
+       caption = "Point differential standardized as if teams played 82 game season.") +
+  scale_linetype_discrete(name = "Time Series Type") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```

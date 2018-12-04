@@ -1,0 +1,289 @@
+---
+title: STAT 485 - Team Performance Imbalance in the NHL
+author: "Trevor Dallow"
+date: "December 3, 2018"
+output: word_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pkgs <- c("XML", "RCurl", "tidyverse", "tseries", "TSA", "forecast")
+
+miss <- pkgs[!(pkgs %in% row.names(installed.packages()))]
+
+if (length(miss)) {
+  install.packages(miss)
+}
+
+suppressPackageStartupMessages(lapply(pkgs, require, character.only = T))
+```
+
+# Introduction
+
+The National Hockey League (NHL) recently began another cycle of expansion, first with the addition of the Los Vegas Knights to the league in the 2017/18 season and next with a team based in Seattle which will join in the 2020/21. Historically, teams that have been newly introduced to the league have been plague with years of poor performance, having been dominated by the more tenured teams in the league. Recently however, it seems that the NHL has determined a method of introduction that spares new teams from years of growing pains, as was seen with the Los Vegas Knights successful campaign in the 2017/18 season. In this report we investigate how the imbalance of team talent across the league evolves over time in terms of the difference in points acquired by the best and worst performing teams for each season. 
+
+## Data Acquisition
+
+The raw data was acquired from the Internet Hockey Database where 100 seasons of NHL standings data spanning from 1918 to 2018 was scrapped from the website [REFERENCE NEEDED]. The standings for each season include data such as team name, number of games played, number of wins, number of losses, number of points, etc. for all the teams the competed in that season. The data of interest for this report is the number of games played and number of points won by each team for each season. Over time, the number of teams participating in a given season and the number of games played for each season fluctuates, so the time series data of interest must ensure that each data point must be on the same scale. In the next section we will discuss the time series data specifically.
+
+```{r Generate url links of nhl standings, include = F}
+first.year <- 1918
+last.year <- 2018
+
+# base.nhl.url <- "http://www.hockeydb.com/ihdb/stats/leagues/seasons/nhl1927"
+# nhl.url <- paste0(base.nhl.url, first.year:last.year, ".html")
+```
+
+```{r Extract table from each url link then bind all tables, include = F}
+# standings.ls <- vector(mode = "list")
+# for (i in first.year:last.year) {
+#   nhl.page <- getURL(nhl.url[i - (first.year - 1)])
+#   
+#   curr.standings <- readHTMLTable(nhl.page)
+#   
+#   if (length(curr.standings)) {
+#     standings.ls[[as.character(i)]] <- cbind('Year' = i, curr.standings[[1]])
+#   } else {
+#     # Skip for full season lockouts
+#   }
+# }
+# 
+# all.standings.bind <- bind_rows(standings.ls)
+```
+
+```{r Clean the extracted standings tables, include = F}
+# all.standings <- all.standings.bind %>%
+#   rename(Playoff = `Playoff Results`, Tie = `T`) %>%
+#   filter(Playoff != "") %>%
+#   mutate(GP = as.numeric(GP),
+#          W = as.numeric(W),
+#          L = as.numeric(L),
+#          Tie = as.numeric(Tie),
+#          Pts = as.numeric(Pts),
+#          GF = as.numeric(GF),
+#          GA = as.numeric(GA),
+#          PIM = as.numeric(PIM),
+#          Att. = as.numeric(gsub(",", "", Att.)),
+#          OTL = as.numeric(OTL),
+#          SOL = as.numeric(SOL))
+# 
+# write.csv(all.standings, file = "nhl_standings_1918-2018.csv", row.names = F)
+```
+
+## The Time Series Data
+
+The purpose of this report is to analyze the imbalance in talent across teams and how it changes over time. The time series data in this report uses the difference in points won by the best and worst team to represent a metric for the league imbalance of each season. For each team in a given season, the proportion of points won out compared to the total number of points that could possibly be won is computed. Then the difference in these proportions of the best and the worst performing team is taken for each season. After which the data is normalised such that the scale is the difference in the number of points won between the best and worst team as if the teams played 82 games in a season. 82 games is used as it is currently the standard number of games played by each team per season. 
+
+Note that the there was no season in 2005 due to a league-wide lockout, 2005 is ignored in the analysis.
+
+```{r Extract data of interest from the table, include = F}
+all.standings <- read.csv(file = "nhl_standings_1918-2018.csv")
+
+quantile(all.standings$Pts, probs = c(0.1, 0.9))
+
+nhl.standings.smy <- all.standings %>%
+  # Determine total possible points obtainable for each team for every season
+  mutate(tot.pts = GP * 2,
+         # Determine the proportion of possible points obtainable that each team achieved
+         prop.tot.pts = Pts / tot.pts) %>%
+  group_by(Year) %>%
+  summarise(diff.prop = max(prop.tot.pts) - min(prop.tot.pts)) %>%
+  ungroup() %>%
+  # Standardize the point differential as if the teams played 82 games a season
+  # 82 games because thats the number of games played per season currently
+  mutate(diff.pts = diff.prop * (82 * 2))
+
+all.years <- first.year:last.year
+
+missing.years <- all.years[!(all.years %in% nhl.standings.smy$Year)]
+```
+
+```{r The time series data, include = F}
+standings.ts <- ts(nhl.standings.smy$diff.pts)
+```
+
+# Methods
+
+## Normality
+
+When checking for normality in out time series data, we see significant evidence against it given the curvature of thee QQ-plot. Doing a log transform improves the normality of the data significantly. We will proceed with the log transform of the data for further analysis. 
+
+```{r normaility of original, echo = F}
+qqnorm(standings.ts)
+qqline(standings.ts)
+```
+
+```{r, echo = F}
+log.standings.ts <- log(standings.ts)
+
+qqnorm(log.standings.ts, main = "Log Transform")
+qqline(log.standings.ts)
+```
+
+
+## Stationarity
+
+Now we wish to specify a model for this time series data. First we examine the stationarity of the time series data. In this instance the data appears to be stationary without the need for any difference. Below are times series plots of the original and first difference of the data. We also consider the results of an Augmented Dickey-Fuller Test which checks for the existence of unit roots in the characteristic polynomial. With an alternative hypothesis that the time series is stationary and testing with a lag of order 0 we get a p-value of 0.01, which with an $\alpha$ = 0.05 gives us significant evidence to reject the null hypothesis that the process is non-stationary and conclude that the process is stationary without the need for differencing. This result supports our findings from the time series plots. 
+
+```{r original and first difference, echo = F}
+par(mfrow = c(1, 2))
+plot(log.standings.ts, type = "l",
+     main = "Original",
+     xlab = "Season", ylab = "log(Point Difference)")
+plot(diff(log.standings.ts), type = "l",
+     main = "1st Difference",
+     xlab = "Season", ylab = "")
+par(mfrow = c(1, 1))
+```
+
+```{r augmented dickey-fuller test, include = F}
+adf.test(log.standings.ts, k = 0)
+```
+
+## Model Specification
+
+Next we wish to consider the ACF and PACF with regards to our time series data to determine the p and q parameters for our ARIMA(p, d, q) model. Examining the ACF plot we that the sample acf values seem to trail off after lag 1 which may suggest an MA(1) model. The acf values at lag 10 exceed the error bound, this will be ignored for a more parimonious model. As well, the PACF values of the PACF plot remain within the error bounds after lag 1, except for lag 10. For the purposes of parimony we will only consider up to an AR(1) model.
+
+```{r acf and pacf plots, echo = F}
+acf(log.standings.ts)
+
+pacf(log.standings.ts)
+```
+
+We also conduct hypothesis tests to determine the order of the model. 
+
+> $H_o$: ${Y_t}$ is a MA(q) model given $|\hat\rho_k| < 2\sqrt{Var(\hat\rho_k)}$ for k > q
+
+> $H_o$: ${Y_t}$ is a AR(p) model given $|\hat\phi_{kk}| < 2\sqrt{Var(\hat\phi_{kk})}$ for k > p
+
+We see from the results of our testing that we do not reject MA(1) and AR(1) models, supporting our findings from analysing the acf and pacf plots. 
+
+```{r order specification, include = F}
+ts.acf <- acf(log.standings.ts, plot = F)$acf
+
+ts.pacf <- pacf(log.standings.ts, plot = F)$acf
+
+abs(ts.acf[3:length(ts.acf)]) < 2 * sqrt((1 / length(log.standings.ts)) * (1 + 2 * sum(ts.acf[2] ^ 2)))
+
+abs(ts.pacf[2:length(ts.pacf)]) < 2 /sqrt(length(log.standings.ts))
+```
+
+## Parameter Estimation
+
+Now that we have a general idea of the order of our model, we may start to estimate the parameters of said model. We consider two methods for estimating the parameters: Least Squares and Maximum Likelihood Estimates. In addition to ARMA(1, 1), we also consider AR(1) and MA(1) models. The results from our parameter estimation tests agree with our suspicions that the data is an ARMA(1, 1) process given that the log-likelihood for both methods is maximized when an ARMA(1, 1) model is considered.
+
+```{r estimate parameters, include = F}
+set.seed(1)
+
+arima(log.standings.ts, order = c(1, 0, 0), method = "CSS")
+arima(log.standings.ts, order = c(0, 0, 1), method = "CSS")
+arima(log.standings.ts, order = c(1, 0, 1), method = "CSS")
+
+arima(log.standings.ts, order = c(1, 0, 0), method = "ML")
+arima(log.standings.ts, order = c(0, 0, 1), method = "ML")
+arima(log.standings.ts, order = c(1, 0, 1), method = "ML")
+```
+
+# Results
+
+## Model Diagnostics
+
+Now that we have our fitted model, we wish to check its adequacy be evaluating its residuals.
+
+```{r fit the model, include = F}
+# USING ML for ARMA(1,1)
+
+fit <- arima(log.standings.ts, order = c(1, 0, 1), method = "ML")
+```
+
+### Residual Analysis
+
+We start our model diagnostics by checking whether the residuals express any trends. We see that our residuals are centrered on a zero horizontal line and do not appear to have any trend. 
+
+```{r mean 0 and constant variance, echo = F}
+plot(rstandard(fit), ylab ='Standardized Residuals', 
+     type = 'o', ylim = c(-3.5,3.5))
+abline(h = c(0, -3, 3), lty = c(1, 2, 2))
+```
+
+### Normality of Residuals
+
+Next we check the normality of the residuals using Q-Q plots. The residuals appear to roughly follow a normal distribution, though they may be heavy-tailed. There is a significant outlier on the left tail of the distribution. By doing a Shapiro-Wilk Normaility Test we can statistically evaluate the normality of the residuals. With a p-value = 0.077, we do not reject the normality of the residuals ($\alpha = 0.05$). 
+
+> $H_o$: The sample data comes from a normal distribution.
+
+```{r residual normality, echo = F}
+qqnorm(residuals(fit))
+qqline(residuals(fit))
+```
+
+```{r shpiro test, include = F}
+shapiro.test(residuals(fit))
+```
+
+### Autocorrelation of Residuals
+
+We wish to evaluate the autocorrelation of the residuals. Given the ACF plot of the residuals we do see that there is some correlation between them, specifically for lags 10 and 12 as they exceed the boundaries. This is cause for concern as it suggests there exists some autocorrelation between residuals and so the error terms may not be entirely white noise. 
+
+```{r acf residuals, echo = F}
+acf(residuals(fit))
+```
+
+### Ljung-Box Test
+
+We conduct a Ljung-Box Test to check whether the error terms are uncorrelated. At $\alpha = 0.05$ we fail to reject the hypothesis that the data are independently distributed (p-value = 0.579). WIth this result we may consider that the error terms are uncorrelated. 
+
+> $H_o$: The data are independently distributed, i.e. error terms are uncorrelated.
+
+```{r ljung-box test, include = F}
+n = length(log.standings.ts)
+K = 6
+
+q <- n * (n + 2) * sum(signif(acf(residuals(fit), plot = F)$acf[1:K], 2) ^ 2 / (n - c(1:K)))
+
+1 - pchisq(q = q, df = K - 1 - 1)
+```
+
+## Final Model Parameters
+
+The final model chosen to fit the time series process is an ARMA(1, 1) model with parameters $\phi = 0.2896$ and $\theta = -0.1400$ (following the textbook's convention of MA models). 
+
+```{r final model parameters, include = F}
+log.mean <- mean(log.standings.ts)
+log.se <- sd(log.standings.ts)
+
+ts.sim <- arima.sim(list(order = c(1, 0, 1), ar = 0.2896, ma = 0.1400), n = length(log.standings.ts))
+
+mean(log.standings.ts)
+sd(log.standings.ts)
+```
+
+```{r compare original and simlated, echo = F, warnings = F}
+df <- data.frame(season = 1:length(log.standings.ts),
+                 original = exp(log.standings.ts),
+                 simulated = exp(ts.sim * log.se + log.mean)) %>%
+  gather(key = ts.type, value = observation, -season)
+
+ggplot(df, aes(x = season, y = observation, lty = ts.type)) +
+  geom_line() +
+  labs(title = "Team Talent Discrepancy in the NHL",
+       x = "Season",
+       y = "Point Differential",
+       caption = "Point differential standardized as if teams played 82 game season.") +
+  scale_linetype_discrete(name = "Time Series Type") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+# Discussion
+
+Given that parameter estimates suggest a single AR component, this indicates that the point differential of the previous season is slightly influences the current season's point differential. This can be explained by the fact that teams typically don't change much as far as which players are on the team and coaching styles from one season to the next. As a result one may expect the results of the previous season to yield some insight as to how the team will perform in the current season. But over the course of 5 years for example, many players may be traded, retire or brought up from farm teams as well as changes in the coaching staff which result in the same team being significantly different when compared 5 years apart. It is not typical for the composition of a team to change significantly in the span of a few seasons so we would expect a low order for the AR component of the ARMA model. 
+
+Future improvements could be to decide on a different metric for comparing the performance of strong and weak teams. In this report, only the best and worst team for each season were compared which may not be indicative of league imbalance in that one team could simply have an unusually good or bad season but the rest of the league was relatively competitive. One could instead consider a metric that compares the points obtained by the best set of teams against the worst set of teams to mitigate the impact of outliers. As well, instead of just looking at points acquired, other team statistics could be investigated such as goals scored for and against and compare the best and worst teams. 
+
+# References
+
+-hockeydb
+-wikipedia nhl
+-textbook
